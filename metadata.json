@@ -1,0 +1,6 @@
+{
+  "name": "Meu Gestor",
+  "description": "Plataforma SaaS profissional de gestão empresarial para pequenas e médias empresas.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
