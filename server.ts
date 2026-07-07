@@ -11,7 +11,7 @@ import pg from "pg";
 const Pool = pg.Pool;
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
-import { initializeApp, getApps } from "firebase-admin/app";
+import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { Company, User, DashboardStats, Product, Client, Sale, CustomRole, Permission, StockNotification, WhatsappConfig } from "./src/types.ts";
 
@@ -26,14 +26,37 @@ try {
   console.error("Failed to read firebase-applet-config.json", e);
 }
 
-if (getApps().length === 0 && firebaseConfig.projectId) {
-  initializeApp({
-    projectId: firebaseConfig.projectId
-  });
-  console.log(`Firebase Admin SDK initialized with project ID: ${firebaseConfig.projectId}`);
-} else if (getApps().length === 0) {
-  initializeApp();
-  console.log("Firebase Admin SDK initialized with default credentials");
+if (getApps().length === 0) {
+  const saEnv = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (saEnv) {
+    try {
+      const sa = JSON.parse(saEnv.trim());
+      initializeApp({
+        credential: cert(sa),
+        projectId: firebaseConfig.projectId || sa.project_id
+      });
+      console.log(`Firebase Admin SDK initialized with Service Account from environment variable for project ID: ${firebaseConfig.projectId || sa.project_id}`);
+    } catch (err: any) {
+      console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT JSON from environment, falling back:", err);
+      if (firebaseConfig.projectId) {
+        initializeApp({
+          projectId: firebaseConfig.projectId
+        });
+        console.log(`Firebase Admin SDK initialized with project ID from config: ${firebaseConfig.projectId}`);
+      } else {
+        initializeApp();
+        console.log("Firebase Admin SDK initialized with default credentials");
+      }
+    }
+  } else if (firebaseConfig.projectId) {
+    initializeApp({
+      projectId: firebaseConfig.projectId
+    });
+    console.log(`Firebase Admin SDK initialized with project ID: ${firebaseConfig.projectId}`);
+  } else {
+    initializeApp();
+    console.log("Firebase Admin SDK initialized with default credentials");
+  }
 }
 
 // Helper to get Firestore instance with the correct database ID if specified
@@ -48,6 +71,36 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Global database loading state to prevent race conditions on serverless environments
+let dbLoaded = false;
+let dbLoadingPromise: Promise<void> | null = null;
+
+async function ensureDbLoaded() {
+  if (dbLoaded) return;
+  if (!dbLoadingPromise) {
+    dbLoadingPromise = loadDb().then(() => {
+      dbLoaded = true;
+    });
+  }
+  await dbLoadingPromise;
+}
+
+// Middleware to ensure database is loaded before processing any API requests
+app.use(async (req, res, next) => {
+  if (req.path.startsWith("/api")) {
+    try {
+      await ensureDbLoaded();
+    } catch (err: any) {
+      console.error("Database initialization failed inside Express middleware:", err);
+      return res.status(500).json({
+        error: "Erro na inicialização do banco de dados.",
+        details: err.message || err
+      });
+    }
+  }
+  next();
+});
 
 // ==========================================
 // IN-MEMORY DATABASE (With demo data)
@@ -1281,6 +1334,16 @@ const requireModule = (moduleKey: string) => {
 // ==========================================
 // API REST ENDPOINTS
 // ==========================================
+
+// Root API Info
+app.get("/api", (req, res) => {
+  res.json({
+    status: "ok",
+    message: "Meu Gestor API is online and fully functional",
+    version: "1.0.0",
+    time: new Date().toISOString()
+  });
+});
 
 // Health Check
 app.get("/api/health", (req, res) => {
@@ -4372,7 +4435,12 @@ app.get("/api/external/market-data", requireAuth, async (req: any, res) => {
 // ==========================================
 
 async function startServer() {
-  await loadDb();
+  await ensureDbLoaded();
+
+  if (process.env.VERCEL) {
+    console.log("Running in Vercel Serverless environment. Skipping app.listen and Vite middleware.");
+    return;
+  }
 
   if (process.env.NODE_ENV !== "production") {
     console.log("Starting server in DEVELOPMENT mode with Vite Middleware...");
@@ -4396,3 +4464,5 @@ async function startServer() {
 }
 
 startServer();
+
+export default app;
